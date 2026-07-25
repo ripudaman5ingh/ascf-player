@@ -1,0 +1,26 @@
+{
+  "name": "ascf-player",
+  "version": "0.1.0",
+  "description": "Zero-dependency <ascf-player> web component that plays ASCILINE .ascf clips on a canvas",
+  "type": "module",
+  "main": "./src/ascf-player.js",
+  "module": "./src/ascf-player.js",
+  "unpkg": "./dist/ascf-player.js",
+  "exports": {
+    ".": "./src/ascf-player.js",
+    "./decoder": "./src/decoder.js",
+    "./dist/ascf-player.js": "./dist/ascf-player.js"
+  },
+  "files": ["src", "dist", "README.md"],
+  "sideEffects": ["./src/ascf-player.js", "./dist/ascf-player.js"],
+  "scripts": {
+    "build": "node build.js",
+    "test": "node test/decode.test.js",
+    "demo": "python3 -m http.server 8080",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "keywords": ["asciiline", "ascf", "ascii", "web-component", "custom-element", "canvas", "player", "video"],
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/ripudaman5ingh/ascf-player.git" },
+  "engines": { "node": ">=18" }
+}

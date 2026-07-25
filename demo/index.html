@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>&lt;ascf-player&gt; demo</title>
+<script type="module" src="../dist/ascf-player.js"></script>
+<style>
+  body {
+    margin: 0; padding: 2rem; background: #0b0d10; color: #cbd5e1;
+    font: 14px/1.6 ui-monospace, monospace;
+    display: grid; gap: 2rem; place-content: start center; max-width: 900px; margin-inline: auto;
+  }
+  h1 { font-size: 1rem; letter-spacing: .2em; text-transform: uppercase; color: #7dd3fc; margin: 0; }
+  p  { margin: 0; color: #64748b; }
+  ascf-player { width: 100%; }
+  /* same clip, restyled per-instance with plain CSS custom properties */
+  .themed {
+    --ascf-radius: 14px;
+    --ascf-accent: #f472b6;
+    --ascf-controls-background: linear-gradient(transparent, rgba(80,0,50,.8));
+    --ascf-controls-color: #fbcfe8;
+    filter: hue-rotate(140deg) saturate(1.4);
+    box-shadow: 0 0 40px rgba(244,114,182,.25);
+  }
+  code { color: #7dd3fc; }
+</style>
+</head>
+<body>
+  <h1>&lt;ascf-player&gt;</h1>
+  <p>Autoplaying, looping, no user gesture — it's a canvas, not a <code>&lt;video&gt;</code>.</p>
+  <ascf-player src="test.ascf" controls autoplay loop></ascf-player>
+
+  <p>Same file, restyled with CSS custom properties on the host.</p>
+  <ascf-player class="themed" src="test.ascf" controls loop></ascf-player>
+
+  <p id="log"></p>
+  <script type="module">
+    const p = document.querySelector('ascf-player');
+    p.addEventListener('loadedmetadata', () => {
+      const m = p.metadata;
+      log.textContent = `loaded: ${m.cols}x${m.rows} · mode ${m.renderMode}${m.pixelMode ? ' pixel' : ''} · ${m.fps.toFixed(1)}fps · ${m.totalFrames} frames`;
+    });
+  </script>
+</body>
+</html>
