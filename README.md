@@ -1,10 +1,38 @@
 # ascf-player
 
-A zero-dependency Web Component that plays [ASCILINE](https://github.com/ripudaman5ingh/ASCILINE) `.ascf`
-clips on a `<canvas>`, the way asciinema plays terminal recordings.
+A zero-dependency Web Component that plays `.ascf` clips on a `<canvas>`, the way asciinema plays terminal
+recordings — plus a local convert-and-play portal that turns an `.mp4` into an `.ascf` and plays it.
 
 No `<video>` tag, no browser codec, **no autoplay restrictions** — the picture is just cells painted on a
 canvas, so it starts without a user gesture. Only audio (a separate `.mp3`) needs one, per browser policy.
+
+## Local convert-and-play portal
+
+Drop an `.mp4` in the browser; a small Python backend runs the bundled compiler
+(`ASCILINE-main/compiler.py`) and the page plays the resulting `.ascf` with `<ascf-player>`.
+
+**This is a local app, not a static site** — it needs **Python 3.9+** and **FFmpeg** installed, because the
+conversion runs FFmpeg + OpenCV on your machine.
+
+Make sure **ffmpeg** is on your PATH (e.g. `brew install ffmpeg`), then:
+
+```sh
+./start.sh            # first run makes the venv + installs deps, starts the
+                      # portal on http://localhost:8000, and opens the browser
+```
+
+Or do it by hand:
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -r ASCILINE-main/requirements.txt   # numpy + opencv-python
+.venv/bin/python portal.py                                # serves http://localhost:8000
+open http://localhost:8000                                # Linux: xdg-open, Windows: start
+```
+
+Every upload is compiled with `compiler.py <file>.mp4 --cols 700 --pixel --quantize 0`. Output `.ascf`
+(and `.mp3` if the video had audio) land in `ASCILINE-main/static_player/`; the page auto-plays the result
+and offers a **Download .ascf** button.
 
 ## Embed
 

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "asciline"
+version = "0.1.0"
+description = "Compiler that encodes video into the ASCILINE .ascf format."
+requires-python = ">=3.9"
+authors = [
+    { name = "YusufB5" }
+]
+dependencies = [
+    "opencv-python>=4.8.0",
+    "numpy>=1.24.0",
+]
+
+[tool.setuptools]
+py-modules = [
+    "ascii_video_player2",
+    "codec",
+    "compiler",
+    "logo",
+]

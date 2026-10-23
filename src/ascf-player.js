@@ -350,6 +350,9 @@ export class AscfPlayer extends HTMLElement {
       for (let s = 0, d = 0; s < src.length; s += 3, d += 4) {
         dst[d] = src[s + 2]; dst[d + 1] = src[s + 1]; dst[d + 2] = src[s];   // BGR -> RGB
       }
+      // Optional playback effect: a pure mutation of the decoded RGB grid. Set
+      // player.pixelEffect = (imageData, {cols, rows, time}) => {} to hook in.
+      if (this.pixelEffect) this.pixelEffect(this.#imageData, { cols: h.cols, rows: h.rows, time: this.#time });
       ctx.putImageData(this.#imageData, 0, 0);
       return;
     }

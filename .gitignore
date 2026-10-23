@@ -1,3 +1,8 @@
 node_modules/
 .DS_Store
 *.tgz
+.venv/
+ASCILINE-main/static_player/*.ascf
+ASCILINE-main/static_player/*.mp3
+*.depth
+__pycache__/

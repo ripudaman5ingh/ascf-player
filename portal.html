@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ascf convert &amp; play</title>
+<script type="module" src="/player.js"></script>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+}}
+</script>
+<style>#relief { width: 100%; max-width: 720px; aspect-ratio: 16/10; background: #050505; }
+#relief canvas { width: 100%; height: 100%; display: block; }</style>
+</head>
+<body>
+  <h1>Convert &amp; play</h1>
+
+  <p>
+    <button id="pick" type="button">Choose an .mp4 or .ascf</button> or drop one anywhere on this page.
+    <input id="file" type="file" accept="video/mp4,video/*,.ascf,.mp3,audio/mpeg" multiple hidden>
+  </p>
+  <p id="status"></p>
+
+  <div id="result" hidden>
+    <ascf-player id="player" controls autoplay loop></ascf-player>
+    <p>
+      <button id="download" type="button">Download .ascf</button>
+      View:
+      <select id="viewmode">
+        <option value="2d">2D</option>
+        <option value="3d">3D relief</option>
+      </select>
+      Effect:
+      <select id="effect">
+        <option value="none">None</option>
+        <option value="led">LED wall</option>
+        <option value="palette">Palette remap</option>
+        <option value="ripple">Ripple / wave</option>
+        <option value="spotlight">Spotlight</option>
+      </select>
+      <span id="led-ctl" hidden>size <input id="led-size" type="range" min="1" max="24" value="8"></span>
+      <span id="palette-ctl" hidden>
+        <select id="palette-mode">
+          <option value="duotone">Duotone</option>
+          <option value="wash">Color wash</option>
+          <option value="invert">Invert</option>
+        </select>
+        <input id="palette-color" type="color" value="#ff9900">
+      </span>
+      <span id="ripple-ctl" hidden>amount <input id="ripple-amt" type="range" min="0" max="100" value="40"></span>
+      <span id="spotlight-ctl" hidden>radius <input id="spot-r" type="range" min="5" max="80" value="30"></span>
+    </p>
+    <div id="relief" hidden></div>
+  </div>
+
+  <script>
+    const pick = document.getElementById('pick');
+    const fileInput = document.getElementById('file');
+    const statusEl = document.getElementById('status');
+    const result = document.getElementById('result');
+    const player = document.getElementById('player');
+    const download = document.getElementById('download');
+    let ascfUrl = null, ascfName = null, localUrls = [];
+
+    const ext = f => f.name.slice(f.name.lastIndexOf('.')).toLowerCase();
+
+    // Route by extension: .ascf plays straight (optional .mp3 alongside), .mp4 converts.
+    function handle(files) {
+      const list = [...files];
+      const ascf = list.find(f => ext(f) === '.ascf');
+      if (ascf) return playLocal(ascf, list.find(f => ext(f) === '.mp3'));
+      const mp4 = list.find(f => ext(f) === '.mp4' || f.type.startsWith('video/'));
+      if (mp4) return convert(mp4);
+      statusEl.textContent = 'Give me an .mp4 or .ascf.';
+    }
+
+    function playLocal(ascf, mp3) {
+      localUrls.forEach(URL.revokeObjectURL); localUrls = [];
+      const mk = f => { const u = URL.createObjectURL(f); localUrls.push(u); return u; };
+      ascfUrl = mk(ascf); ascfName = ascf.name;
+      if (mp3) player.setAttribute('audio', mk(mp3)); else player.removeAttribute('audio');
+      player.setAttribute('src', ascfUrl);
+      window.relief3D?.setDepth(null);   // direct .ascf -> no depth, brightness fallback
+      result.hidden = false;
+      statusEl.textContent = 'Loaded ' + ascf.name + (mp3 ? ' + ' + mp3.name : '');
+    }
+
+    async function convert(file) {
+      if (!file) return;
+      result.hidden = true;
+      statusEl.textContent = `Converting ${file.name}… (this can take a while)`;
+      try {
+        const res = await fetch('/convert?name=' + encodeURIComponent(file.name), {
+          method: 'POST', body: file,       // raw file body == curl --data-binary
+        });
+        if (!res.ok) { statusEl.textContent = 'Failed: ' + await res.text(); return; }
+        const out = await res.json();       // { ascf, mp3, download }
+        ascfUrl = out.ascf;
+        ascfName = out.download;
+        if (out.mp3) player.setAttribute('audio', out.mp3);
+        else player.removeAttribute('audio');
+        player.setAttribute('src', out.ascf);
+        window.relief3D?.setDepth(out.depth || null);
+        result.hidden = false;
+        statusEl.textContent = 'Done.';
+      } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+      }
+    }
+
+    pick.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => handle(fileInput.files));
+
+    download.addEventListener('click', () => {
+      if (!ascfUrl) return;
+      const a = document.createElement('a');
+      a.href = ascfUrl; a.download = ascfName;
+      a.click();
+    });
+
+    // Drop anywhere; preventDefault on both so the browser never navigates to the file.
+    document.addEventListener('dragover', e => e.preventDefault());
+    document.addEventListener('drop', e => {
+      e.preventDefault();
+      handle(e.dataTransfer.files);
+    });
+
+    // ---- live playback effects (pure mutations of the decoded RGB grid) ----
+    // ponytail: per-pixel JS loop each frame. Fine at portal scale; move to a
+    // WebGL shader if you push cols way up or want many effects stacked.
+    const effect = document.getElementById('effect');
+    const el = id => document.getElementById(id);
+    const ledSize = el('led-size'), palMode = el('palette-mode'), palColor = el('palette-color'),
+          rippleAmt = el('ripple-amt'), spotR = el('spot-r');
+    const cursor = { x: 0.5, y: 0.5 };   // normalised over the canvas
+
+    player.addEventListener('pointermove', e => {
+      const r = player.getBoundingClientRect();
+      cursor.x = (e.clientX - r.left) / r.width;
+      cursor.y = (e.clientY - r.top) / r.height;
+    });
+
+    const hexRGB = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+    const lum = (r, g, b) => 0.299 * r + 0.587 * g + 0.114 * b;
+
+    const effects = {
+      led(d, W, H) {
+        const B = +ledSize.value;
+        if (B <= 1) return;                       // smooth
+        const gap = B <= 3 ? 0 : Math.round(B * 0.2);
+        const src = d.slice();
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+          const i = (y * W + x) * 4;
+          if (x % B >= B - gap || y % B >= B - gap) { d[i] = d[i + 1] = d[i + 2] = 0; continue; }
+          const sx = Math.min(W - 1, (x - x % B) + (B >> 1)), sy = Math.min(H - 1, (y - y % B) + (B >> 1));
+          const s = (sy * W + sx) * 4;
+          d[i] = src[s]; d[i + 1] = src[s + 1]; d[i + 2] = src[s + 2];
+        }
+      },
+      palette(d) {
+        const mode = palMode.value, [ar, ag, ab] = hexRGB(palColor.value);
+        for (let i = 0; i < d.length; i += 4) {
+          if (mode === 'invert') { d[i] = 255 - d[i]; d[i + 1] = 255 - d[i + 1]; d[i + 2] = 255 - d[i + 2]; continue; }
+          const t = lum(d[i], d[i + 1], d[i + 2]) / 255;
+          if (mode === 'wash') { d[i] = ar * t; d[i + 1] = ag * t; d[i + 2] = ab * t; }
+          else { d[i] = ar * t; d[i + 1] = ag * t; d[i + 2] = ab * t; d[i] += (1 - t) * 8; }  // duotone: accent->near-black
+        }
+      },
+      ripple(d, W, H, time) {
+        const amt = +rippleAmt.value / 100;
+        if (amt <= 0) return;
+        const src = d.slice();
+        for (let y = 0; y < H; y++) {
+          const wave = Math.sin(y * 0.15 + time * 3);
+          const bright = 1 + amt * 0.6 * wave;
+          const shift = Math.round(amt * 6 * wave);
+          for (let x = 0; x < W; x++) {
+            const i = (y * W + x) * 4;
+            const sx = Math.min(W - 1, Math.max(0, x + shift));
+            const s = (y * W + sx) * 4;
+            d[i] = src[s] * bright; d[i + 1] = src[s + 1] * bright; d[i + 2] = src[s + 2] * bright;
+          }
+        }
+      },
+      spotlight(d, W, H) {
+        const cx = cursor.x * W, cy = cursor.y * H;
+        const r = +spotR.value / 100 * Math.hypot(W, H) * 0.5, fall = r;
+        const src = d.slice();
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+          const i = (y * W + x) * 4;
+          const dist = Math.hypot(x - cx, y - cy);
+          const f = Math.max(0, Math.min(1, 1 - (dist - r) / fall));   // 1 near, 0 far
+          const B = 1 + Math.round((1 - f) * 10);                       // blockier when far
+          const sx = x - x % B, sy = y - y % B, s = (sy * W + sx) * 4;
+          const dim = 0.12 + 0.88 * f;
+          d[i] = src[s] * dim; d[i + 1] = src[s + 1] * dim; d[i + 2] = src[s + 2] * dim;
+        }
+      },
+    };
+
+    function applyEffect() {
+      const name = effect.value;
+      for (const c of ['led', 'palette', 'ripple', 'spotlight'])
+        el(c + '-ctl').hidden = name !== c;
+      player.pixelEffect = name === 'none' ? null
+        : (imgData, meta) => effects[name](imgData.data, meta.cols, meta.rows, meta.time);
+    }
+    effect.addEventListener('change', applyEffect);
+    applyEffect();
+
+    // ---- 2D / 3D relief view toggle ----
+    // relief3D (defined in the module below) owns player.pixelEffect while active,
+    // reading the same decoded grid the 2D effects mutate.
+    const viewmode = el('viewmode');
+    viewmode.addEventListener('change', () => {
+      const three = viewmode.value === '3d';
+      effect.disabled = three;
+      player.style.display = three ? 'none' : '';   // rAF keeps ticking, so the hook keeps firing
+      if (three) window.relief3D.enable(player);
+      else { window.relief3D.disable(); applyEffect(); }
+    });
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    const TARGET_COLS  = 256;   // max relief grid width; sampling keeps near this
+    // Fixed Z scale: depth is 0..1 over a 5-unit-wide plane. ~4.2 (3x the old 1.4)
+    // makes near/far separation dramatic.
+    const RELIEF_HEIGHT = 4.2;
+
+    let renderer, scene, camera, controls, mesh, geo, raf = 0;
+    let gW = 0, gH = 0, step = 1, lastCols = 0, lastRows = 0, lum = null, blur = null, smooth = null;
+    let depth = null, pl = null;   // parsed .depth companion + the player driving us
+    function init() {
+      const box = document.getElementById('relief');
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setPixelRatio(window.devicePixelRatio);   // crisp on retina
+      box.appendChild(renderer.domElement);
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(45, 16 / 10, 0.1, 100);
+      camera.position.set(5, -4, 4.5);   // ~45° to the side + above, so depth reads without dragging
+      // Grazing side light rakes across the surface so slopes self-shade and reveal relief.
+      const light = new THREE.DirectionalLight(0xffffff, 2.4);
+      light.position.set(-5, 1, 1.2);
+      scene.add(light);
+      scene.add(new THREE.AmbientLight(0xffffff, 0.35));   // lift the shadows a touch
+      controls = new OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 0, 0);
+      addEventListener('resize', resize);
+    }
+
+    function resize() {
+      const box = document.getElementById('relief');
+      const w = box.clientWidth, h = box.clientHeight;
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+    }
+
+    function build(cols, rows) {
+      step = Math.max(1, Math.ceil(cols / TARGET_COLS));
+      gW = Math.floor(cols / step);
+      gH = Math.floor(rows / step);
+      const aspect = gW / gH, s = 5;
+      const pw = aspect >= 1 ? s : s * aspect;
+      const ph = aspect >= 1 ? s / aspect : s;
+      if (mesh) { scene.remove(mesh); geo.dispose(); mesh.material.dispose(); }
+      geo = new THREE.PlaneGeometry(pw, ph, gW - 1, gH - 1);   // gW*gH verts, row-major top->bottom
+      geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(gW * gH * 3), 3));
+      lum = new Float32Array(gW * gH);
+      blur = new Float32Array(gW * gH);
+      smooth = new Float32Array(gW * gH);   // temporal EMA of heights
+      mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial(
+        { vertexColors: true, roughness: 0.85, metalness: 0, side: THREE.DoubleSide }));
+      scene.add(mesh);
+    }
+
+    function update(imageData, cols, rows, time) {
+      if (!scene) return;
+      if (cols !== lastCols || rows !== lastRows) { build(cols, rows); lastCols = cols; lastRows = rows; }
+      const d = imageData.data, pos = geo.attributes.position, col = geo.attributes.color;
+
+      // Height source: the .depth grid for this frame if present & grid-matched, else brightness.
+      let dgrid = null;
+      if (depth && depth.cols === cols && depth.rows === rows) {
+        const fps = pl && pl.metadata ? pl.metadata.fps : 0;
+        const f = Math.min(depth.count - 1, Math.max(0, Math.round(time * fps)));
+        dgrid = depth.data.subarray(f * depth.frameSize, (f + 1) * depth.frameSize);
+      }
+
+      // Pass 1: sample height (depth or brightness) + color per grid vertex.
+      let vi = 0;
+      for (let iy = 0; iy < gH; iy++) {
+        const cy = Math.min(rows - 1, iy * step);
+        for (let ix = 0; ix < gW; ix++) {
+          const cx = Math.min(cols - 1, ix * step);
+          const ci = cy * cols + cx, si = ci * 4;
+          const r = d[si] / 255, g = d[si + 1] / 255, b = d[si + 2] / 255;
+          lum[vi] = dgrid ? dgrid[ci] / 255 : 0.299 * r + 0.587 * g + 0.114 * b;
+          col.setXYZ(vi, r, g, b);
+          vi++;
+        }
+      }
+      // Temporal smoothing: depth is estimated per-frame, so EMA against the last frame
+      // to kill shimmer. new = 0.6*current + 0.4*previous.
+      for (let i = 0; i < lum.length; i++) smooth[i] = 0.6 * lum[i] + 0.4 * smooth[i];
+
+      // Pass 2: clamp each vertex to its neighbourhood (kills single-cell spikes),
+      // then 5x5 box blur of heights only (color stays crisp), then displace.
+      const h = RELIEF_HEIGHT, CLAMP = 0.25;   // max a cell may exceed its neighbours
+      for (let iy = 0; iy < gH; iy++) for (let ix = 0; ix < gW; ix++) {
+        let sum = 0, n = 0;                     // neighbour sum, excluding centre
+        for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+          if (!dx && !dy) continue;
+          const y = iy + dy, x = ix + dx;
+          if (y < 0 || y >= gH || x < 0 || x >= gW) continue;
+          sum += smooth[y * gW + x]; n++;
+        }
+        const avg = n ? sum / n : smooth[iy * gW + ix];
+        const c = Math.min(avg + CLAMP, Math.max(avg - CLAMP, smooth[iy * gW + ix]));
+        blur[iy * gW + ix] = (c + sum) / (n + 1);   // box blur incl. clamped centre
+      }
+      for (let i = 0; i < blur.length; i++) pos.setZ(i, blur[i] * h);
+      pos.needsUpdate = true; col.needsUpdate = true;
+      geo.computeVertexNormals();
+    }
+
+    function animate() {
+      raf = requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    window.relief3D = {
+      enable(player) {
+        pl = player;
+        if (!renderer) init();
+        document.getElementById('relief').hidden = false;
+        resize();
+        player.pixelEffect = (img, meta) => update(img, meta.cols, meta.rows, meta.time);
+        if (!raf) animate();
+      },
+      disable() {
+        document.getElementById('relief').hidden = true;
+        cancelAnimationFrame(raf); raf = 0;
+      },
+      // Load the per-frame depth companion (null = none -> falls back to brightness).
+      async setDepth(url) {
+        depth = null;
+        if (!url) return;
+        try {
+          const buf = await (await fetch(url)).arrayBuffer();
+          const dv = new DataView(buf);
+          if (dv.getUint32(0) !== 0x44505448) return;   // 'DPTH'
+          const cols = dv.getUint16(4), rows = dv.getUint16(6), count = dv.getUint32(8);
+          depth = { cols, rows, count, data: new Uint8Array(buf, 12), frameSize: cols * rows };
+        } catch (e) { console.warn('[relief] depth load failed', e); depth = null; }
+      },
+    };
+  </script>
+</body>
+</html>
