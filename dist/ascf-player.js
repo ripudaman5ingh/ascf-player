@@ -538,10 +538,16 @@ class AscfPlayer extends HTMLElement {
       for (let s = 0, d = 0; s < src.length; s += 3, d += 4) {
         dst[d] = src[s + 2]; dst[d + 1] = src[s + 1]; dst[d + 2] = src[s];   // BGR -> RGB
       }
-      // Optional playback effect: a pure mutation of the decoded RGB grid. Set
+      // Optional playback effect: mutate the decoded RGB grid in place, or return a
+      // different-sized ImageData to show instead (the player reshapes to fit it).
       // player.pixelEffect = (imageData, {cols, rows, time}) => {} to hook in.
-      if (this.pixelEffect) this.pixelEffect(this.#imageData, { cols: h.cols, rows: h.rows, time: this.#time });
-      ctx.putImageData(this.#imageData, 0, 0);
+      const out = (this.pixelEffect && this.pixelEffect(this.#imageData, { cols: h.cols, rows: h.rows, time: this.#time })) || this.#imageData;
+      if (this.#canvas.width !== out.width || this.#canvas.height !== out.height) {
+        this.#canvas.width = out.width;
+        this.#canvas.height = out.height;
+        this.style.aspectRatio = `${out.width} / ${out.height}`;
+      }
+      ctx.putImageData(out, 0, 0);
       return;
     }
 

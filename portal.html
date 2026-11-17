@@ -5,14 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ascf convert &amp; play</title>
 <script type="module" src="/player.js"></script>
-<script type="importmap">
-{ "imports": {
-  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
-}}
-</script>
-<style>#relief { width: 100%; max-width: 720px; aspect-ratio: 16/10; background: #050505; }
-#relief canvas { width: 100%; height: 100%; display: block; }</style>
+<style>ascf-player { max-height: 85vh; }   /* tall remix targets letterbox instead of overflowing */</style>
 </head>
 <body>
   <h1>Convert &amp; play</h1>
@@ -27,11 +20,6 @@
     <ascf-player id="player" controls autoplay loop></ascf-player>
     <p>
       <button id="download" type="button">Download .ascf</button>
-      View:
-      <select id="viewmode">
-        <option value="2d">2D</option>
-        <option value="3d">3D relief</option>
-      </select>
       Effect:
       <select id="effect">
         <option value="none">None</option>
@@ -39,11 +27,15 @@
         <option value="palette">Palette remap</option>
         <option value="ripple">Ripple / wave</option>
         <option value="spotlight">Spotlight</option>
+        <option value="glitch">Glitch</option>
+        <option value="thermal">Thermal vision</option>
+        <option value="neon">Neon edges</option>
+        <option value="breakout">Breakout (game)</option>
+        <option value="remix">Pixel remix</option>
       </select>
       <span id="led-ctl" hidden>size <input id="led-size" type="range" min="1" max="24" value="8"></span>
       <span id="palette-ctl" hidden>
         <select id="palette-mode">
-          <option value="duotone">Duotone</option>
           <option value="wash">Color wash</option>
           <option value="invert">Invert</option>
         </select>
@@ -51,8 +43,15 @@
       </span>
       <span id="ripple-ctl" hidden>amount <input id="ripple-amt" type="range" min="0" max="100" value="40"></span>
       <span id="spotlight-ctl" hidden>radius <input id="spot-r" type="range" min="5" max="80" value="30"></span>
+      <span id="glitch-ctl" hidden>intensity <input id="glitch-amt" type="range" min="0" max="100" value="50"></span>
+      <span id="remix-ctl" hidden>
+        target (image or video) <input id="rx-file" type="file" accept="image/*,video/*">
+        color match <input id="rx-color" type="range" min="0" max="6" value="3">
+        <button id="rx-toggle" type="button" disabled>Assemble</button>
+      </span>
+      <span id="breakout-ctl" hidden><b id="bo-info"></b> <button id="bo-restart" type="button">Restart</button></span>
+      <span id="neon-ctl" hidden>glow <input id="neon-glow" type="range" min="5" max="100" value="40"></span>
     </p>
-    <div id="relief" hidden></div>
   </div>
 
   <script>
@@ -73,7 +72,9 @@
       if (ascf) return playLocal(ascf, list.find(f => ext(f) === '.mp3'));
       const mp4 = list.find(f => ext(f) === '.mp4' || f.type.startsWith('video/'));
       if (mp4) return convert(mp4);
-      statusEl.textContent = 'Give me an .mp4 or .ascf.';
+      const img = list.find(f => f.type.startsWith('image/'));
+      if (img) return rxLoad(img);              // dropped image -> pixel remix target
+      statusEl.textContent = 'Give me an .mp4, .ascf or an image.';
     }
 
     function playLocal(ascf, mp3) {
@@ -82,7 +83,6 @@
       ascfUrl = mk(ascf); ascfName = ascf.name;
       if (mp3) player.setAttribute('audio', mk(mp3)); else player.removeAttribute('audio');
       player.setAttribute('src', ascfUrl);
-      window.relief3D?.setDepth(null);   // direct .ascf -> no depth, brightness fallback
       result.hidden = false;
       statusEl.textContent = 'Loaded ' + ascf.name + (mp3 ? ' + ' + mp3.name : '');
     }
@@ -102,7 +102,6 @@
         if (out.mp3) player.setAttribute('audio', out.mp3);
         else player.removeAttribute('audio');
         player.setAttribute('src', out.ascf);
-        window.relief3D?.setDepth(out.depth || null);
         result.hidden = false;
         statusEl.textContent = 'Done.';
       } catch (e) {
@@ -133,7 +132,8 @@
     const effect = document.getElementById('effect');
     const el = id => document.getElementById(id);
     const ledSize = el('led-size'), palMode = el('palette-mode'), palColor = el('palette-color'),
-          rippleAmt = el('ripple-amt'), spotR = el('spot-r');
+          rippleAmt = el('ripple-amt'), spotR = el('spot-r'),
+          glitchAmt = el('glitch-amt'), neonGlow = el('neon-glow');
     const cursor = { x: 0.5, y: 0.5 };   // normalised over the canvas
 
     player.addEventListener('pointermove', e => {
@@ -144,6 +144,120 @@
 
     const hexRGB = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
     const lum = (r, g, b) => 0.299 * r + 0.587 * g + 0.114 * b;
+    // Deterministic 0..1 noise, so a glitch looks the same when you seek back to it.
+    const rand = (a, b) => { const v = Math.sin(a * 12.9898 + b * 78.233) * 43758.5453; return v - Math.floor(v); };
+    // Heat-camera palette: black -> navy -> purple -> red -> orange -> yellow -> white.
+    const thermalLUT = (() => {
+      const stops = [[0, 0, 0], [20, 0, 100], [140, 0, 160], [230, 30, 30], [255, 140, 0], [255, 230, 40], [255, 255, 255]];
+      const lut = new Uint8Array(256 * 3);
+      for (let v = 0; v < 256; v++) {
+        const p = v / 255 * (stops.length - 1), j = Math.min(stops.length - 2, p | 0), f = p - j;
+        for (let c = 0; c < 3; c++) lut[v * 3 + c] = stops[j][c] + (stops[j + 1][c] - stops[j][c]) * f;
+      }
+      return lut;
+    })();
+
+    // ---- Breakout: the video is the bricks. Bright cells bounce the ball and get
+    // blasted into holes that stay put while the video plays underneath. Ticks
+    // once per video frame, so pausing the video pauses the game.
+    const bo = { W: 0, H: 0, mask: null, x: 0, y: 0, vx: 0, vy: 0, score: 0, lives: 3, over: false };
+    const boInfo = el('bo-info');
+    function boServe() {
+      const sp = bo.W / 90, a = (Math.random() - 0.5) * 1.2;
+      bo.x = cursor.x * bo.W; bo.y = bo.H * 0.8; bo.vx = sp * Math.sin(a); bo.vy = -sp * Math.cos(a);
+    }
+    function boReset(W, H) { Object.assign(bo, { W, H, mask: new Uint8Array(W * H), score: 0, lives: 3, over: false }); boServe(); }
+    el('bo-restart').addEventListener('click', () => { bo.W = 0; });   // next frame resets
+
+    // ---- Pixel remix: rearrange (never recolor) each frame's cells into a target
+    // image. Match by brightness rank: k-th darkest video cell -> k-th darkest
+    // target cell. Counting sort over 256 levels keeps it O(n) per frame.
+    // ponytail: colour match is a local swap search, not optimal transport; good
+    // enough by eye. Real OT (e.g. sliced Wasserstein) if it ever needs to be exact.
+    const RX_MS = 2000;   // fly-in duration
+    // Output takes the TARGET's aspect: a TW x TH grid with TW*TH <= video cells.
+    // Target rank k pulls video rank floor(k*n/m), so the < TW leftover cells are
+    // dropped evenly across brightness rather than all from one end.
+    const rx = { img: null, isVideo: false, W: 0, H: 0, TW: 0, TH: 0, out: null, ctx: null, on: false, t0: -1e9,
+                 tgtOrder: null, tgtL: null, tgtRGB: null, srcOrder: null, L: null, A: null, delay: null };
+    const rxColor = el('rx-color');
+    function rankByLum(L, out) {                 // stable counting sort: out = indices darkest -> brightest
+      const cnt = new Uint32Array(257);
+      for (let j = 0; j < L.length; j++) cnt[L[j] + 1]++;
+      for (let v = 0; v < 256; v++) cnt[v + 1] += cnt[v];
+      for (let j = 0; j < L.length; j++) out[cnt[L[j]]++] = j;
+    }
+    function rxGrid(n, aspect) {                 // ~n cells shaped like the target
+      const TW = Math.max(1, Math.round(Math.sqrt(n * aspect)));
+      return [TW, Math.max(1, Math.floor(n / TW))];
+    }
+    function rxSetTarget(TW, TH, W, H) {         // allocate buffers for a W x H video -> TW x TH target
+      const m = TW * TH, n = W * H, out = new ImageData(TW, TH);
+      for (let i = 3; i < out.data.length; i += 4) out.data[i] = 255;
+      Object.assign(rx, { W, H, TW, TH, out, tgtOrder: new Uint32Array(m), tgtL: new Uint8Array(m), tgtRGB: new Uint8Array(m * 3),
+                          srcOrder: new Uint32Array(n), L: new Uint8Array(n), A: new Uint32Array(m), delay: new Float32Array(m) });
+      for (let k = 0; k < m; k++) rx.delay[k] = rand(k, 7);   // staggered launch per cell
+    }
+    function rxRankTarget(px) {                  // pure: target RGBA pixels -> colours + brightness ranking
+      const { tgtL: L, tgtRGB: C } = rx;
+      for (let j = 0; j < L.length; j++) {
+        C[j * 3] = px[j * 4]; C[j * 3 + 1] = px[j * 4 + 1]; C[j * 3 + 2] = px[j * 4 + 2];
+        L[j] = lum(px[j * 4], px[j * 4 + 1], px[j * 4 + 2]) | 0;
+      }
+      rankByLum(L, rx.tgtOrder);
+    }
+    function rxReadTarget() {                    // draw the whole target, uncropped; per frame for videos
+      rx.ctx.drawImage(rx.img, 0, 0, rx.TW, rx.TH);
+      rxRankTarget(rx.ctx.getImageData(0, 0, rx.TW, rx.TH).data);
+    }
+    function rxPrepare(W, H) {
+      const iw = rx.img.videoWidth || rx.img.width, ih = rx.img.videoHeight || rx.img.height;
+      const [TW, TH] = rxGrid(W * H, iw / ih);
+      const c = document.createElement('canvas'); c.width = TW; c.height = TH;
+      rx.ctx = c.getContext('2d', { willReadFrequently: true });
+      rxSetTarget(TW, TH, W, H);
+      rxReadTarget();
+    }
+    // Colour match: brightness ranking gets the shape right but not the hue. Try
+    // swapping each cell's video pixel with one a little further along the ranking
+    // (so about the same brightness) and keep the swap when both land closer to
+    // their target colours. Each pass is one sweep; more passes = truer colours.
+    function rxRefine(d, A, passes) {
+      const { tgtOrder: T, tgtRGB: C } = rx, m = A.length;
+      const err = (s, t) => {
+        const r = d[s * 4] - C[t * 3], g = d[s * 4 + 1] - C[t * 3 + 1], b = d[s * 4 + 2] - C[t * 3 + 2];
+        return r * r + g * g + b * b;
+      };
+      for (let p = 0; p < passes; p++) for (let k = 0; k < m; k++) {
+        const j = k + 1 + (Math.random() * 512 | 0);
+        if (j >= m) continue;
+        const sk = A[k], sj = A[j], tk = T[k], tj = T[j];
+        if (err(sk, tj) + err(sj, tk) < err(sk, tk) + err(sj, tj)) { A[k] = sj; A[j] = sk; }
+      }
+    }
+    const rxProgress = () => { const t = Math.min(1, (performance.now() - rx.t0) / RX_MS); return rx.on ? t : 1 - t; };
+    function rxToggle(on = !rx.on) {             // flip direction mid-flight without a jump
+      const p = rxProgress();
+      rx.on = on;
+      rx.t0 = performance.now() - (on ? p : 1 - p) * RX_MS;
+      el('rx-toggle').textContent = on ? 'Scatter back' : 'Assemble';
+    }
+    async function rxLoad(file) {
+      if (rx.isVideo) { rx.img.pause(); URL.revokeObjectURL(rx.img.src); }
+      rx.isVideo = file.type.startsWith('video/');
+      if (rx.isVideo) {                          // video target: plays hidden, muted, looping
+        const v = document.createElement('video');
+        Object.assign(v, { src: URL.createObjectURL(file), muted: true, loop: true, playsInline: true });
+        await v.play();
+        rx.img = v;
+      } else rx.img = await createImageBitmap(file);
+      rx.W = 0;                                  // re-rank on next frame
+      el('rx-toggle').disabled = false;
+      if (effect.value !== 'remix') { effect.value = 'remix'; applyEffect(); }
+      rx.on = false; rx.t0 = -1e9; rxToggle(true);   // play the fly-in straight away
+    }
+    el('rx-file').addEventListener('change', e => e.target.files[0] && rxLoad(e.target.files[0]));
+    el('rx-toggle').addEventListener('click', () => rxToggle());
 
     const effects = {
       led(d, W, H) {
@@ -164,8 +278,7 @@
         for (let i = 0; i < d.length; i += 4) {
           if (mode === 'invert') { d[i] = 255 - d[i]; d[i + 1] = 255 - d[i + 1]; d[i + 2] = 255 - d[i + 2]; continue; }
           const t = lum(d[i], d[i + 1], d[i + 2]) / 255;
-          if (mode === 'wash') { d[i] = ar * t; d[i + 1] = ag * t; d[i + 2] = ab * t; }
-          else { d[i] = ar * t; d[i + 1] = ag * t; d[i + 2] = ab * t; d[i] += (1 - t) * 8; }  // duotone: accent->near-black
+          d[i] = ar * t; d[i + 1] = ag * t; d[i + 2] = ab * t;   // wash
         }
       },
       ripple(d, W, H, time) {
@@ -198,169 +311,138 @@
           d[i] = src[s] * dim; d[i + 1] = src[s + 1] * dim; d[i + 2] = src[s + 2] * dim;
         }
       },
+      glitch(d, W, H, time) {
+        const amt = +glitchAmt.value / 100;
+        if (amt <= 0) return;
+        const src = d.slice(), k = Math.round(amt * 4);      // RGB split distance
+        const seed = Math.floor(time * 12), bh = Math.max(2, H / 40 | 0);
+        for (let y = 0; y < H; y++) {
+          const band = y / bh | 0;                           // tear whole strips, not single rows
+          const tear = rand(seed, band) < amt * 0.3 ? Math.round((rand(band, seed) - 0.5) * W * 0.2 * amt) : 0;
+          const at = x => (y * W + Math.min(W - 1, Math.max(0, x))) * 4;
+          for (let x = 0; x < W; x++) {
+            const i = (y * W + x) * 4, sx = x + tear;
+            d[i] = src[at(sx + k)]; d[i + 1] = src[at(sx) + 1]; d[i + 2] = src[at(sx - k) + 2];
+          }
+        }
+      },
+      thermal(d) {
+        for (let i = 0; i < d.length; i += 4) {
+          const v = lum(d[i], d[i + 1], d[i + 2]) | 0;
+          d[i] = thermalLUT[v * 3]; d[i + 1] = thermalLUT[v * 3 + 1]; d[i + 2] = thermalLUT[v * 3 + 2];
+        }
+      },
+      neon(d, W, H) {
+        const gain = +neonGlow.value / 25, src = d.slice(), L = new Float32Array(W * H);
+        for (let j = 0, i = 0; j < L.length; j++, i += 4) L[j] = lum(src[i], src[i + 1], src[i + 2]);
+        for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+          const j = y * W + x, i = j * 4;
+          if (!x || !y || x === W - 1 || y === H - 1) { d[i] = d[i + 1] = d[i + 2] = 0; continue; }
+          // Sobel edge strength on brightness
+          const gx = L[j - W + 1] + 2 * L[j + 1] + L[j + W + 1] - L[j - W - 1] - 2 * L[j - 1] - L[j + W - 1];
+          const gy = L[j + W - 1] + 2 * L[j + W] + L[j + W + 1] - L[j - W - 1] - 2 * L[j - W] - L[j - W + 1];
+          const e = Math.min(1, Math.hypot(gx, gy) / 255 * gain);
+          // Edge glows in its own hue at full brightness (black pixels glow white).
+          const m = Math.max(src[i], src[i + 1], src[i + 2]), n = m ? 255 / m : 0;
+          d[i] = (m ? src[i] * n : 255) * e; d[i + 1] = (m ? src[i + 1] * n : 255) * e; d[i + 2] = (m ? src[i + 2] * n : 255) * e;
+        }
+      },
+      breakout(d, W, H) {
+        if (bo.W !== W || bo.H !== H) boReset(W, H);
+        const padW = W / 6, padH = Math.max(2, H / 80 | 0), padY = H * 0.88 | 0,   /* above the controls bar */ R = Math.max(2, W / 60 | 0);
+        const padX = Math.min(W - padW, Math.max(0, cursor.x * W - padW / 2));
+        const solid = (x, y) => {
+          x |= 0; y |= 0;
+          if (x < 0 || y < 0 || x >= W || y >= H) return false;
+          const j = y * W + x, i = j * 4;
+          return !bo.mask[j] && lum(d[i], d[i + 1], d[i + 2]) > 60;
+        };
+        const blast = (cx, cy) => {
+          for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
+            const x = (cx | 0) + dx, y = (cy | 0) + dy;
+            if (dx * dx + dy * dy > R * R || x < 0 || y < 0 || x >= W || y >= H) continue;
+            const j = y * W + x;
+            if (!bo.mask[j]) { bo.mask[j] = 1; bo.score++; }
+          }
+        };
+        if (!bo.over) {
+          // Sub-step so a fast ball never tunnels through a thin bright line.
+          const n = Math.ceil(Math.max(Math.abs(bo.vx), Math.abs(bo.vy)));
+          for (let k = 0; k < n; k++) {
+            const nx = bo.x + bo.vx / n;
+            if (nx < 0 || nx >= W) bo.vx = -bo.vx;
+            else if (solid(nx, bo.y)) { blast(nx, bo.y); bo.vx = -bo.vx; }
+            else bo.x = nx;
+            const ny = bo.y + bo.vy / n;
+            if (ny < 0) bo.vy = -bo.vy;
+            else if (bo.vy > 0 && ny >= padY && bo.y < padY + padH && bo.x >= padX && bo.x <= padX + padW) {
+              const a = ((bo.x - padX) / padW - 0.5) * 2.2, sp = Math.hypot(bo.vx, bo.vy);   // edge hits angle out
+              bo.vx = sp * Math.sin(a); bo.vy = -sp * Math.cos(a);
+            }
+            else if (ny >= H) { if (--bo.lives <= 0) bo.over = true; else boServe(); break; }
+            else if (solid(bo.x, ny)) { blast(bo.x, ny); bo.vy = -bo.vy; }
+            else bo.y = ny;
+          }
+        }
+        for (let j = 0; j < bo.mask.length; j++) if (bo.mask[j]) d[j * 4] = d[j * 4 + 1] = d[j * 4 + 2] = 0;
+        const rect = (x0, y0, w, h) => {
+          for (let y = Math.max(0, y0 | 0); y < Math.min(H, y0 + h); y++)
+            for (let x = Math.max(0, x0 | 0); x < Math.min(W, x0 + w); x++) { const i = (y * W + x) * 4; d[i] = d[i + 1] = d[i + 2] = 255; }
+        };
+        rect(padX, padY, padW, padH);
+        const B = Math.max(2, W / 150 | 0);
+        if (!bo.over) rect(bo.x - B / 2, bo.y - B / 2, B, B);
+        boInfo.textContent = bo.over ? `GAME OVER - ${bo.score} cells destroyed` : `${bo.score} cells destroyed · lives ${bo.lives}`;
+      },
+      remix(d, W, H) {
+        if (rx.img && (rx.W !== W || rx.H !== H)) rxPrepare(W, H);
+        if (!rx.tgtOrder) return;
+        const p = rxProgress();
+        if (p <= 0) return;                      // fully home: untouched video, original shape
+        if (rx.isVideo) rxReadTarget();          // target moves too: re-rank its current frame
+        const { TW, TH, L, A, srcOrder, tgtOrder, delay } = rx, o = rx.out.data, n = W * H, m = TW * TH, r = n / m;
+        for (let j = 0; j < n; j++) L[j] = lum(d[j * 4], d[j * 4 + 1], d[j * 4 + 2]) | 0;
+        rankByLum(L, srcOrder);
+        // Target rank k takes video rank floor(k*n/m): the < TW spare cells drop evenly.
+        for (let k = 0; k < m; k++) A[k] = srcOrder[Math.floor(k * r)];
+        rxRefine(d, A, +rxColor.value);
+        if (p >= 1) {                            // assembled: straight rearrangement
+          for (let k = 0; k < m; k++) {
+            const t = tgtOrder[k] * 4, s = A[k] * 4;
+            o[t] = d[s]; o[t + 1] = d[s + 1]; o[t + 2] = d[s + 2];
+          }
+          return rx.out;
+        }
+        for (let i = 0; i < o.length; i += 4) o[i] = o[i + 1] = o[i + 2] = 0;
+        // In flight: cells start where the video sits (contain-fit in the target frame)
+        // and arc to their target spot.
+        const sc = Math.min(TW / W, TH / H), ox = (TW - W * sc) / 2, oy = (TH - H * sc) / 2;
+        for (let k = 0; k < m; k++) {
+          const s = A[k], t = tgtOrder[k];
+          const l = Math.min(1, Math.max(0, (p - 0.5 * delay[k]) / 0.5));
+          const e = l < 0.5 ? 2 * l * l : 1 - (2 - 2 * l) ** 2 / 2;   // ease in-out
+          const hx = ox + (s % W) * sc, hy = oy + (s / W | 0) * sc, dx = t % TW - hx, dy = (t / TW | 0) - hy;
+          const arc = Math.sin(e * Math.PI) * 0.25;                   // curved, swirly paths
+          const x = Math.round(hx + dx * e + dy * arc), y = Math.round(hy + dy * e - dx * arc);
+          if (x < 0 || y < 0 || x >= TW || y >= TH) continue;
+          const oi = (y * TW + x) * 4, si = s * 4;
+          o[oi] = d[si]; o[oi + 1] = d[si + 1]; o[oi + 2] = d[si + 2];
+        }
+        return rx.out;
+      },
     };
 
     function applyEffect() {
       const name = effect.value;
-      for (const c of ['led', 'palette', 'ripple', 'spotlight'])
+      for (const c of ['led', 'palette', 'ripple', 'spotlight', 'glitch', 'neon', 'breakout', 'remix'])
         el(c + '-ctl').hidden = name !== c;
+      bo.W = 0;   // fresh game each time Breakout is picked
       player.pixelEffect = name === 'none' ? null
         : (imgData, meta) => effects[name](imgData.data, meta.cols, meta.rows, meta.time);
     }
     effect.addEventListener('change', applyEffect);
     applyEffect();
-
-    // ---- 2D / 3D relief view toggle ----
-    // relief3D (defined in the module below) owns player.pixelEffect while active,
-    // reading the same decoded grid the 2D effects mutate.
-    const viewmode = el('viewmode');
-    viewmode.addEventListener('change', () => {
-      const three = viewmode.value === '3d';
-      effect.disabled = three;
-      player.style.display = three ? 'none' : '';   // rAF keeps ticking, so the hook keeps firing
-      if (three) window.relief3D.enable(player);
-      else { window.relief3D.disable(); applyEffect(); }
-    });
   </script>
 
-  <script type="module">
-    import * as THREE from 'three';
-    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-
-    const TARGET_COLS  = 256;   // max relief grid width; sampling keeps near this
-    // Fixed Z scale: depth is 0..1 over a 5-unit-wide plane. ~4.2 (3x the old 1.4)
-    // makes near/far separation dramatic.
-    const RELIEF_HEIGHT = 4.2;
-
-    let renderer, scene, camera, controls, mesh, geo, raf = 0;
-    let gW = 0, gH = 0, step = 1, lastCols = 0, lastRows = 0, lum = null, blur = null, smooth = null;
-    let depth = null, pl = null;   // parsed .depth companion + the player driving us
-    function init() {
-      const box = document.getElementById('relief');
-      renderer = new THREE.WebGLRenderer({ antialias: true });
-      renderer.setPixelRatio(window.devicePixelRatio);   // crisp on retina
-      box.appendChild(renderer.domElement);
-      scene = new THREE.Scene();
-      camera = new THREE.PerspectiveCamera(45, 16 / 10, 0.1, 100);
-      camera.position.set(5, -4, 4.5);   // ~45° to the side + above, so depth reads without dragging
-      // Grazing side light rakes across the surface so slopes self-shade and reveal relief.
-      const light = new THREE.DirectionalLight(0xffffff, 2.4);
-      light.position.set(-5, 1, 1.2);
-      scene.add(light);
-      scene.add(new THREE.AmbientLight(0xffffff, 0.35));   // lift the shadows a touch
-      controls = new OrbitControls(camera, renderer.domElement);
-      controls.target.set(0, 0, 0);
-      addEventListener('resize', resize);
-    }
-
-    function resize() {
-      const box = document.getElementById('relief');
-      const w = box.clientWidth, h = box.clientHeight;
-      renderer.setSize(w, h, false);
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
-    }
-
-    function build(cols, rows) {
-      step = Math.max(1, Math.ceil(cols / TARGET_COLS));
-      gW = Math.floor(cols / step);
-      gH = Math.floor(rows / step);
-      const aspect = gW / gH, s = 5;
-      const pw = aspect >= 1 ? s : s * aspect;
-      const ph = aspect >= 1 ? s / aspect : s;
-      if (mesh) { scene.remove(mesh); geo.dispose(); mesh.material.dispose(); }
-      geo = new THREE.PlaneGeometry(pw, ph, gW - 1, gH - 1);   // gW*gH verts, row-major top->bottom
-      geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(gW * gH * 3), 3));
-      lum = new Float32Array(gW * gH);
-      blur = new Float32Array(gW * gH);
-      smooth = new Float32Array(gW * gH);   // temporal EMA of heights
-      mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial(
-        { vertexColors: true, roughness: 0.85, metalness: 0, side: THREE.DoubleSide }));
-      scene.add(mesh);
-    }
-
-    function update(imageData, cols, rows, time) {
-      if (!scene) return;
-      if (cols !== lastCols || rows !== lastRows) { build(cols, rows); lastCols = cols; lastRows = rows; }
-      const d = imageData.data, pos = geo.attributes.position, col = geo.attributes.color;
-
-      // Height source: the .depth grid for this frame if present & grid-matched, else brightness.
-      let dgrid = null;
-      if (depth && depth.cols === cols && depth.rows === rows) {
-        const fps = pl && pl.metadata ? pl.metadata.fps : 0;
-        const f = Math.min(depth.count - 1, Math.max(0, Math.round(time * fps)));
-        dgrid = depth.data.subarray(f * depth.frameSize, (f + 1) * depth.frameSize);
-      }
-
-      // Pass 1: sample height (depth or brightness) + color per grid vertex.
-      let vi = 0;
-      for (let iy = 0; iy < gH; iy++) {
-        const cy = Math.min(rows - 1, iy * step);
-        for (let ix = 0; ix < gW; ix++) {
-          const cx = Math.min(cols - 1, ix * step);
-          const ci = cy * cols + cx, si = ci * 4;
-          const r = d[si] / 255, g = d[si + 1] / 255, b = d[si + 2] / 255;
-          lum[vi] = dgrid ? dgrid[ci] / 255 : 0.299 * r + 0.587 * g + 0.114 * b;
-          col.setXYZ(vi, r, g, b);
-          vi++;
-        }
-      }
-      // Temporal smoothing: depth is estimated per-frame, so EMA against the last frame
-      // to kill shimmer. new = 0.6*current + 0.4*previous.
-      for (let i = 0; i < lum.length; i++) smooth[i] = 0.6 * lum[i] + 0.4 * smooth[i];
-
-      // Pass 2: clamp each vertex to its neighbourhood (kills single-cell spikes),
-      // then 5x5 box blur of heights only (color stays crisp), then displace.
-      const h = RELIEF_HEIGHT, CLAMP = 0.25;   // max a cell may exceed its neighbours
-      for (let iy = 0; iy < gH; iy++) for (let ix = 0; ix < gW; ix++) {
-        let sum = 0, n = 0;                     // neighbour sum, excluding centre
-        for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
-          if (!dx && !dy) continue;
-          const y = iy + dy, x = ix + dx;
-          if (y < 0 || y >= gH || x < 0 || x >= gW) continue;
-          sum += smooth[y * gW + x]; n++;
-        }
-        const avg = n ? sum / n : smooth[iy * gW + ix];
-        const c = Math.min(avg + CLAMP, Math.max(avg - CLAMP, smooth[iy * gW + ix]));
-        blur[iy * gW + ix] = (c + sum) / (n + 1);   // box blur incl. clamped centre
-      }
-      for (let i = 0; i < blur.length; i++) pos.setZ(i, blur[i] * h);
-      pos.needsUpdate = true; col.needsUpdate = true;
-      geo.computeVertexNormals();
-    }
-
-    function animate() {
-      raf = requestAnimationFrame(animate);
-      controls.update();
-      renderer.render(scene, camera);
-    }
-
-    window.relief3D = {
-      enable(player) {
-        pl = player;
-        if (!renderer) init();
-        document.getElementById('relief').hidden = false;
-        resize();
-        player.pixelEffect = (img, meta) => update(img, meta.cols, meta.rows, meta.time);
-        if (!raf) animate();
-      },
-      disable() {
-        document.getElementById('relief').hidden = true;
-        cancelAnimationFrame(raf); raf = 0;
-      },
-      // Load the per-frame depth companion (null = none -> falls back to brightness).
-      async setDepth(url) {
-        depth = null;
-        if (!url) return;
-        try {
-          const buf = await (await fetch(url)).arrayBuffer();
-          const dv = new DataView(buf);
-          if (dv.getUint32(0) !== 0x44505448) return;   // 'DPTH'
-          const cols = dv.getUint16(4), rows = dv.getUint16(6), count = dv.getUint32(8);
-          depth = { cols, rows, count, data: new Uint8Array(buf, 12), frameSize: cols * rows };
-        } catch (e) { console.warn('[relief] depth load failed', e); depth = null; }
-      },
-    };
-  </script>
 </body>
 </html>

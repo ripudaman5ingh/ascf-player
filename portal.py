@@ -9,7 +9,6 @@ import http.server
 import json
 import os
 import re
-import struct
 import subprocess
 import sys
 import tempfile
@@ -23,18 +22,8 @@ OUT_DIR = os.path.join(ASCILINE, "static_player")
 COMPILE_ARGS = ["--cols", "700", "--pixel", "--quantize", "2"]
 
 
-def ascf_meta(path):
-    """(fps, cols, rows, totalFrames) from an ASC2 .ascf header."""
-    with open(path, "rb") as f:
-        h = f.read(18)
-    return (struct.unpack(">f", h[4:8])[0],
-            struct.unpack(">H", h[10:12])[0],
-            struct.unpack(">H", h[12:14])[0],
-            struct.unpack(">I", h[14:18])[0])
-
-
-def convert(mp4_path, out_name, with_depth=True):
-    """Run the compiler on mp4_path. Returns (ascf, mp3|None, depth|None)."""
+def convert(mp4_path, out_name):
+    """Run the compiler on mp4_path. Returns (ascf, mp3|None)."""
     subprocess.run(
         [sys.executable, COMPILER, mp4_path, *COMPILE_ARGS, "--out", out_name],
         cwd=ASCILINE, check=True,
@@ -44,22 +33,7 @@ def convert(mp4_path, out_name, with_depth=True):
     if not os.path.exists(os.path.join(OUT_DIR, ascf)):
         raise RuntimeError("compiler produced no .ascf")
     mp3 = mp3 if os.path.exists(os.path.join(OUT_DIR, mp3)) else None
-
-    depth = None
-    if with_depth:
-        # Best-effort: a depth failure must never sink the .ascf/.mp3 flow.
-        try:
-            import depth as depthmod
-            fps, cols, rows, total = ascf_meta(os.path.join(OUT_DIR, ascf))
-            dname = f"{out_name}.depth"
-            n = depthmod.generate_depth(
-                mp4_path, cols, rows, fps, os.path.join(OUT_DIR, dname),
-                total, progress=lambda m: print(m, flush=True))
-            depth = dname
-            print(f"depth done: {n} frames -> {dname}", flush=True)
-        except Exception as e:  # noqa: BLE001 - degrade, don't fail the convert
-            print(f"depth skipped: {e}", flush=True)
-    return ascf, mp3, depth
+    return ascf, mp3
 
 
 def safe_name(raw):
@@ -114,11 +88,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         break
                     f.write(chunk)
                     remaining -= len(chunk)
-            ascf, mp3, depth = convert(tmp, out_name)
+            ascf, mp3 = convert(tmp, out_name)
             self._send(200, json.dumps({
                 "ascf": f"/out/{ascf}",
                 "mp3": f"/out/{mp3}" if mp3 else None,
-                "depth": f"/out/{depth}" if depth else None,
                 "download": ascf,
             }), "application/json")
         except subprocess.CalledProcessError as e:
@@ -139,7 +112,7 @@ def selftest():
         check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     try:
-        ascf, _, _ = convert(mp4, "selftest", with_depth=False)
+        ascf, _ = convert(mp4, "selftest")
         assert os.path.exists(os.path.join(OUT_DIR, ascf)), "no .ascf produced"
         assert safe_name("../../etc/passwd.mp4") == "passwd"
         print("selftest ok:", ascf)
